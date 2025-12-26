@@ -1,5 +1,4 @@
 # app.py
-import os
 from pathlib import Path
 import pickle
 
@@ -8,24 +7,26 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 import streamlit as st
+import streamlit.components.v1 as components
 
-# ============== 配置 ==============
+
+# ============== Page config ==============
 st.set_page_config(
     page_title="Respiratory Failure Risk Calculator (SVM)",
     layout="wide",
 )
 
-# ============== 资源路径（与 app.py 同目录） ==============
+# ============== Paths (same directory as app.py) ==============
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "svm_model.pkl"
 SCALER_PATH = BASE_DIR / "scaler.pkl"
 BG_PATH = BASE_DIR / "shap_background.pkl"
 
-# 你的特征顺序（必须与训练时一致）
+# Feature order (must match training)
 FEATURE_COLS = ["Age", "PaO2", "PF_ratio", "pneumonia", "ISS"]
 
 
-# ============== 工具函数 ==============
+# ============== Utilities ==============
 def load_pickle(path: Path):
     with open(path, "rb") as f:
         return pickle.load(f)
@@ -33,7 +34,6 @@ def load_pickle(path: Path):
 
 @st.cache_resource
 def load_assets():
-    # 检查文件是否齐全
     missing = []
     for p in [MODEL_PATH, SCALER_PATH]:
         if not p.exists():
@@ -44,7 +44,6 @@ def load_assets():
     model = load_pickle(MODEL_PATH)
     scaler = load_pickle(SCALER_PATH)
 
-    # background 不是必须（用于 SHAP）
     bg = None
     if BG_PATH.exists():
         bg = load_pickle(BG_PATH)
@@ -53,7 +52,7 @@ def load_assets():
 
 
 def safe_predict_proba(model, X_scaled: pd.DataFrame) -> float:
-    """返回正类概率"""
+    """Return positive-class probability."""
     proba = model.predict_proba(X_scaled)
     return float(proba[0, 1])
 
@@ -75,7 +74,7 @@ def scale_features(scaler, X: pd.DataFrame) -> pd.DataFrame:
 
 
 def _prepare_bg(bg):
-    """把 background 处理成 (n, n_features) 的 numpy array，并确保列顺序一致"""
+    """Ensure background is a 2D numpy array with correct feature order."""
     if bg is None:
         return np.zeros((50, len(FEATURE_COLS)), dtype=float)
 
@@ -86,7 +85,6 @@ def _prepare_bg(bg):
         if bg_arr.ndim == 1:
             bg_arr = bg_arr.reshape(1, -1)
 
-    # 防御：列数不匹配则退化
     if bg_arr.ndim != 2 or bg_arr.shape[1] != len(FEATURE_COLS):
         bg_arr = np.zeros((50, len(FEATURE_COLS)), dtype=float)
 
@@ -96,24 +94,22 @@ def _prepare_bg(bg):
 @st.cache_resource
 def build_shap_explainer(_model, bg):
     """
-    ✅ 核心修复：
-    - 参数名用 _model：Streamlit 不会对它做 hash，避免 Cannot hash argument 'model'
+    Key fix:
+    - Use parameter name `_model` so Streamlit does NOT hash the model object,
+      avoiding: Cannot hash argument 'model' (sklearn SVC).
     """
     import shap
-
     bg_arr = _prepare_bg(bg)
-
-    # 用 predict_proba 作为 black-box 解释入口
     explainer = shap.Explainer(_model.predict_proba, bg_arr)
     return explainer
 
 
 def _extract_positive_class_explanation(sv, X_scaled: pd.DataFrame):
     """
-    兼容不同 SHAP 输出形态：
-    - 常见二分类：values shape (1, n_features, 2) / base_values shape (1,2)
-    - 也可能：values shape (1, n_features) / base_values shape (1,)
-    返回：shap.Explanation（用于 waterfall）
+    Robustly extract a single-case explanation for the positive class (class=1),
+    compatible with common SHAP output shapes:
+    - values: (1, n_features, 2) and base_values: (1, 2)
+    - values: (1, n_features) and base_values: (1,)
     """
     import shap
 
@@ -126,25 +122,25 @@ def _extract_positive_class_explanation(sv, X_scaled: pd.DataFrame):
     values = np.asarray(values)
     base_values = np.asarray(base_values)
 
-    # data：用于显示特征值
     data_row = X_scaled.iloc[0].values
 
-    # Case A: (1, n_features, 2) -> 取正类 index=1
+    # Binary classification output: (1, n_features, 2)
     if values.ndim == 3 and values.shape[-1] == 2:
         v = values[0, :, 1]
         if base_values.ndim >= 2 and base_values.shape[-1] == 2:
             bv = float(base_values[0, 1])
         else:
-            # 兜底：取第一个
             bv = float(np.ravel(base_values)[0])
 
-    # Case B: (1, n_features) -> 直接用
+    # Single output: (1, n_features)
     elif values.ndim == 2 and values.shape[0] == 1:
         v = values[0, :]
         bv = float(np.ravel(base_values)[0])
 
     else:
-        raise ValueError(f"Unexpected SHAP values shape: {values.shape}, base_values shape: {base_values.shape}")
+        raise ValueError(
+            f"Unexpected SHAP shapes: values={values.shape}, base_values={base_values.shape}"
+        )
 
     exp = shap.Explanation(
         values=v,
@@ -156,14 +152,10 @@ def _extract_positive_class_explanation(sv, X_scaled: pd.DataFrame):
 
 
 def render_shap_waterfall(explainer, X_scaled: pd.DataFrame):
-    """
-    生成单病例 SHAP waterfall
-    返回 matplotlib figure
-    """
-    import shap  # 放内部：云端装包失败时不影响主预测
+    """Single-case SHAP waterfall plot (matplotlib figure)."""
+    import shap
 
     sv = explainer(X_scaled)
-
     exp = _extract_positive_class_explanation(sv, X_scaled)
 
     fig = plt.figure(figsize=(8.5, 5.2))
@@ -172,16 +164,34 @@ def render_shap_waterfall(explainer, X_scaled: pd.DataFrame):
     return fig
 
 
+def render_shap_force_html(explainer, X_scaled: pd.DataFrame) -> str:
+    """Single-case SHAP force plot (HTML, positive class)."""
+    import shap
+
+    sv = explainer(X_scaled)
+    exp = _extract_positive_class_explanation(sv, X_scaled)
+
+    fp = shap.force_plot(
+        base_value=exp.base_values,
+        shap_values=exp.values,
+        features=exp.data,
+        feature_names=exp.feature_names,
+        matplotlib=False
+    )
+    html = f"<head>{shap.getjs()}</head><body>{fp.html()}</body>"
+    return html
+
+
 def to_csv_download(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8-sig")
 
 
 # ============== UI ==============
 st.title("🫁 Respiratory Failure Risk Calculator (SVM)")
-st.caption("输入临床变量 → 输出个体风险（概率） + 单病例 SHAP 解释（waterfall）")
-st.info("提示：该工具用于科研展示与辅助决策，不替代临床医生判断。")
+st.caption("Enter clinical variables → get individual risk probability + optional single-case SHAP explanation.")
+st.info("For research and decision support only. Not a substitute for clinical judgment.")
 
-# 侧边栏输入
+# Sidebar inputs
 st.sidebar.header("Input features")
 
 age = st.sidebar.number_input("Age (years)", min_value=0.0, max_value=120.0, value=60.0, step=1.0)
@@ -194,25 +204,22 @@ iss = st.sidebar.number_input("ISS (Injury Severity Score)", min_value=0.0, max_
 
 st.sidebar.markdown("---")
 
-# 阈值
-pt = st.sidebar.slider("Decision threshold (pt)", min_value=0.05, max_value=0.95, value=0.54, step=0.01)
-st.sidebar.caption("建议用于论文阈值解释：pt=0.20 / 0.40 / 0.60（三档）")
+pt = st.sidebar.slider("Decision threshold (pt)", min_value=0.05, max_value=0.95, value=0.50, step=0.01)
+st.sidebar.caption("Tip (paper-friendly): consider pt = 0.20 / 0.40 / 0.60 as three reference thresholds.")
 
-# 主区布局
+# Main layout
 col_left, col_right = st.columns([1.05, 1.0], gap="large")
 
-# ============== 主流程：加载模型并预测 ==============
+# ============== Main workflow ==============
 try:
     model, scaler, bg = load_assets()
     X_raw = build_single_case_df(age, pao2, pf_ratio, pneumonia01, iss)
     X_scaled = scale_features(scaler, X_raw)
     prob = safe_predict_proba(model, X_scaled)
 
-    # 预测标签
     pred_label = int(prob >= pt)
     risk_text = "High risk" if pred_label == 1 else "Low risk"
 
-    # cost:benefit = pt/(1-pt)
     cbr = pt / (1 - pt)
 
     with col_left:
@@ -228,7 +235,7 @@ try:
 
         st.caption(f"Cost:Benefit ratio = pt/(1-pt) = {cbr:.3f}")
 
-        st.markdown("**Raw input:**")
+        st.markdown("**Raw input (unscaled):**")
         st.dataframe(X_raw, use_container_width=True)
 
         st.download_button(
@@ -238,27 +245,34 @@ try:
             mime="text/csv"
         )
 
-    # ============== SHAP（右侧） ==============
     with col_right:
-        st.subheader("Single-case SHAP (waterfall)")
+        st.subheader("Single-case explanation (SHAP)")
 
-        # ✅ 建议默认关闭：云端 SHAP 可能慢/依赖不稳，用户需要再开
         enable_shap = st.toggle("Enable SHAP explanation", value=False)
 
         if not enable_shap:
-            st.info("已关闭 SHAP 解释。开启后将计算单病例 SHAP waterfall。")
+            st.info("SHAP explanation is off. Turn it on to compute single-case explanations (may be slow in cloud environments).")
         else:
+            plot_type = st.radio("SHAP plot type", ["Waterfall", "Force"], horizontal=True)
+
             try:
                 explainer = build_shap_explainer(model, bg)
-                fig = render_shap_waterfall(explainer, X_scaled)
-                st.pyplot(fig, clear_figure=True)
-                st.caption("说明：红色条表示提高预测风险，蓝色条表示降低预测风险（相对于基线）。")
+
+                if plot_type == "Waterfall":
+                    fig = render_shap_waterfall(explainer, X_scaled)
+                    st.pyplot(fig, clear_figure=True)
+                    st.caption("Interpretation: red increases predicted risk; blue decreases predicted risk (relative to the baseline).")
+                else:
+                    html = render_shap_force_html(explainer, X_scaled)
+                    components.html(html, height=320, scrolling=True)
+                    st.caption("Interpretation: contributions pushing right increase predicted risk; pushing left decrease predicted risk.")
             except Exception as e:
                 st.warning(
-                    "SHAP 解释生成失败（不影响概率输出）。常见原因：云端环境下 shap/numba/llvmlite 依赖构建失败或计算超时。"
+                    "Failed to generate SHAP explanation (this does NOT affect the risk prediction). "
+                    "Common reasons: shap/numba/llvmlite build issues on cloud, or computation timeout."
                 )
                 st.code(str(e))
 
 except Exception as e:
-    st.error("App 启动失败：请检查 requirements/runtime 与 pkl 文件是否齐全。")
+    st.error("App failed to start. Please check runtime/requirements and that required .pkl files exist.")
     st.code(str(e))
