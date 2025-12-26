@@ -7,8 +7,6 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 import streamlit as st
-import streamlit.components.v1 as components
-
 
 # ============== Page config ==============
 st.set_page_config(
@@ -99,6 +97,7 @@ def build_shap_explainer(_model, bg):
       avoiding: Cannot hash argument 'model' (sklearn SVC).
     """
     import shap
+
     bg_arr = _prepare_bg(bg)
     explainer = shap.Explainer(_model.predict_proba, bg_arr)
     return explainer
@@ -164,31 +163,13 @@ def render_shap_waterfall(explainer, X_scaled: pd.DataFrame):
     return fig
 
 
-def render_shap_force_html(explainer, X_scaled: pd.DataFrame) -> str:
-    """Single-case SHAP force plot (HTML, positive class)."""
-    import shap
-
-    sv = explainer(X_scaled)
-    exp = _extract_positive_class_explanation(sv, X_scaled)
-
-    fp = shap.force_plot(
-        base_value=exp.base_values,
-        shap_values=exp.values,
-        features=exp.data,
-        feature_names=exp.feature_names,
-        matplotlib=False
-    )
-    html = f"<head>{shap.getjs()}</head><body>{fp.html()}</body>"
-    return html
-
-
 def to_csv_download(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8-sig")
 
 
 # ============== UI ==============
 st.title("🫁 Respiratory Failure Risk Calculator (SVM)")
-st.caption("Enter clinical variables → get individual risk probability + optional single-case SHAP explanation.")
+st.caption("Enter clinical variables → get individual risk probability + optional single-case SHAP waterfall explanation.")
 st.info("For research and decision support only. Not a substitute for clinical judgment.")
 
 # Sidebar inputs
@@ -248,24 +229,17 @@ try:
     with col_right:
         st.subheader("Single-case explanation (SHAP)")
 
-        enable_shap = st.toggle("Enable SHAP explanation", value=False)
+        # Recommended default: off (cloud can be slow)
+        enable_shap = st.toggle("Enable SHAP waterfall explanation", value=False)
 
         if not enable_shap:
-            st.info("SHAP explanation is off. Turn it on to compute single-case explanations (may be slow in cloud environments).")
+            st.info("SHAP explanation is off. Turn it on to compute a single-case SHAP waterfall plot (may be slow in cloud environments).")
         else:
-            plot_type = st.radio("SHAP plot type", ["Waterfall", "Force"], horizontal=True)
-
             try:
                 explainer = build_shap_explainer(model, bg)
-
-                if plot_type == "Waterfall":
-                    fig = render_shap_waterfall(explainer, X_scaled)
-                    st.pyplot(fig, clear_figure=True)
-                    st.caption("Interpretation: red increases predicted risk; blue decreases predicted risk (relative to the baseline).")
-                else:
-                    html = render_shap_force_html(explainer, X_scaled)
-                    components.html(html, height=320, scrolling=True)
-                    st.caption("Interpretation: contributions pushing right increase predicted risk; pushing left decrease predicted risk.")
+                fig = render_shap_waterfall(explainer, X_scaled)
+                st.pyplot(fig, clear_figure=True)
+                st.caption("Interpretation: red increases predicted risk; blue decreases predicted risk (relative to the baseline).")
             except Exception as e:
                 st.warning(
                     "Failed to generate SHAP explanation (this does NOT affect the risk prediction). "
